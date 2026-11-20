@@ -141,6 +141,25 @@ jobs:
                   return sb.toString()
               }
 
+              /** একই শব্দের জনপ্রিয় বিকল্প বানান */
+              private val alt = mapOf(
+                  "আমি" to listOf("aami"), "কেমন" to listOf("kmn", "kemun"), "আছো" to listOf("achho", "asho"),
+                  "আছি" to listOf("achi", "asi"), "ভালো" to listOf("valo", "bhalo"), "তুমি" to listOf("tmi", "tumi"),
+                  "কী" to listOf("ki", "kii"), "না" to listOf("na", "naa")
+              )
+
+              /** প্রথমটি মূল রূপান্তর, বাকিগুলো বিকল্প (সাজেশন বারের জন্য) */
+              fun variants(word: String): List<String> {
+                  val b = convert(word)
+                  val set = LinkedHashSet<String>()
+                  set.add(b)
+                  alt[word]?.let { set.addAll(it) }
+                  if ("bh" in b) set.add(b.replace("bh", "v"))
+                  if ('f' in b) set.add(b.replace("f", "ph"))
+                  if (b.length > 3) set.add(b.first() + b.drop(1).filter { it !in "aeiou" })
+                  return set.take(4)
+              }
+
               /** পুরো বাক্যের জন্য (শব্দ আলাদা করে) */
               fun convertSentence(t: String) = t.split(" ").joinToString(" ") { convert(it) }
           }
@@ -149,33 +168,79 @@ jobs:
           cat > app/src/main/java/com/example/banglish/BanglishIME.kt <<'EOF_FILE'
           package com.example.banglish
 
+          import android.graphics.drawable.GradientDrawable
+          import android.graphics.drawable.StateListDrawable
           import android.inputmethodservice.InputMethodService
+          import android.os.Handler
+          import android.os.Looper
           import android.text.InputType
           import android.view.Gravity
+          import android.view.HapticFeedbackConstants
           import android.view.KeyEvent
+          import android.view.MotionEvent
           import android.view.View
           import android.view.inputmethod.EditorInfo
-          import android.widget.Button
+          import android.widget.FrameLayout
           import android.widget.LinearLayout
+          import android.widget.PopupWindow
+          import android.widget.TextView
 
           class BanglishIME : InputMethodService() {
-              private val buf = StringBuilder()
-              private var banglish = true      // true: Banglish আউটপুট, false: সরাসরি বাংলা
-              private var page = 0
-              private var raw = false          // পাসওয়ার্ড/ইমেইল ফিল্ড
-              private lateinit var root: LinearLayout
-              private lateinit var suggest: Button
+              private class Theme(val bg: Int, val key: Int, val ink: Int, val act: Int, val press: Int, val kar: Int, val hint: Int, val on: Int)
 
-              private val pages = listOf(
-                  listOf("ঙ য ড প ট চ জ হ গ ড়", "ৃ ু ি ব ্ া ক ত দ", "ঁ ো ে র ন স ম"),
-                  listOf("অ আ ই ঈ উ ঊ ঋ এ ঐ ও", "খ ঘ ঝ ঠ ঢ থ ধ ফ ভ ঔ", "ছ ণ ঞ ষ শ ল ং ঃ ৈ ৌ", "ূ ী ৎ ঢ় য় ড়"),
-                  listOf("১ ২ ৩ ৪ ৫ ৬ ৭ ৮ ৯ ০", "! ? ' \" ( ) - : ; @", "/ # & * + = _ % ৳ ।")
+              private val light = Theme(0xFFECEFF1.toInt(), 0xFFFFFFFF.toInt(), 0xFF212121.toInt(), 0xFFCFD8DC.toInt(),
+                  0xFFB0BEC5.toInt(), 0xFFE3F2FD.toInt(), 0xFF78909C.toInt(), 0xFFA5D6A7.toInt())
+              private val dark = Theme(0xFF1B1F23.toInt(), 0xFF37414A.toInt(), 0xFFECEFF1.toInt(), 0xFF263238.toInt(),
+                  0xFF607D8B.toInt(), 0xFF2F4858.toInt(), 0xFF90A4AE.toInt(), 0xFF2E7D32.toInt())
+              private var isDark = false
+              private val th: Theme get() = if (isDark) dark else light
+
+              private val buf = StringBuilder()
+              private var banglish = true          // Banglish আউটপুট চালু/বন্ধ
+              private var lang = 0                 // 0 = বাংলা, 1 = ইংরেজি
+              private var page = 0                 // 0 = অক্ষর, 1 = সংখ্যা/চিহ্ন, 2 = ইমোজি
+              private var shiftState = 0           // 0 বন্ধ, 1 একবার, 2 লক
+              private var lastShift = 0L
+              private var raw = false              // পাসওয়ার্ড/ইমেইল/সংখ্যা ফিল্ড
+              private lateinit var root: LinearLayout
+              private lateinit var chips: LinearLayout
+              private var popup: PopupWindow? = null
+              private val handler = Handler(Looper.getMainLooper())
+              private val repeat = object : Runnable { override fun run() { back(); handler.postDelayed(this, 60) } }
+
+              private val COMB = "ািীুূৃেৈোৌ্ঁ"
+
+              // টোকেন: "মূল|অল্টারনেট১,অল্টারনেট২" (অক্ষর চেপে ধরলে অল্টারনেট আসে)
+              private val bn = listOf(
+                  "ঙ|ং য|\u09DF ড|ঢ প|ফ ট|ঠ চ|ছ জ|ঝ হ|ঞ গ|ঘ \u09DC|\u09DD",
+                  "ৃ|ঋ ু|উ,ূ ি|ই,ী,ঈ ব|ভ ্ া|আ ক|খ ত|ৎ দ|ধ",
+                  "SHIFT ঁ|ঃ ো|ও,ৌ,ঔ ে|এ,ৈ,ঐ র|ল ন|ণ স|ষ ম|শ BACK"
               )
+              private val en = listOf(
+                  "q|1 w|2 e|3 r|4 t|5 y|6 u|7 i|8 o|9 p|0",
+                  "a s d f g h j k l",
+                  "SHIFT z x c v b n m BACK"
+              )
+              private val sym = listOf(
+                  "১|1 ২|2 ৩|3 ৪|4 ৫|5 ৬|6 ৭|7 ৮|8 ৯|9 ০|0",
+                  "! ? @ # ৳ % & * ( )",
+                  "- _ : ; \" ' / + . BACK"
+              )
+              private val emoji = listOf(
+                  "😀 😂 😍 😘 😊 😎 😢 😭 😡 👍",
+                  "🙏 ❤ 🔥 🎉 👌 😅 🤔 😴 🥰 😜",
+                  "🤣 😁 😉 🙂 😇 💔 ✨ 🌹 👏 BACK"
+              )
+
+              override fun onCreate() {
+                  super.onCreate()
+                  isDark = getSharedPreferences("kb", MODE_PRIVATE).getBoolean("dark", false)
+              }
 
               override fun onCreateInputView(): View {
                   root = LinearLayout(this).apply {
                       orientation = LinearLayout.VERTICAL
-                      setBackgroundColor(0xFF263238.toInt())
+                      setPadding(dp(3), dp(2), dp(3), dp(4))
                   }
                   build()
                   return root
@@ -183,7 +248,7 @@ jobs:
 
               override fun onStartInput(info: EditorInfo?, restarting: Boolean) {
                   super.onStartInput(info, restarting)
-                  val t = (info?.inputType ?: 0)
+                  val t = info?.inputType ?: 0
                   val cls = t and InputType.TYPE_MASK_CLASS
                   val v = t and InputType.TYPE_MASK_VARIATION
                   raw = cls != InputType.TYPE_CLASS_TEXT ||
@@ -194,41 +259,26 @@ jobs:
                   buf.setLength(0)
               }
 
+              override fun onFinishInputView(finishingInput: Boolean) { dismissPopup(); super.onFinishInputView(finishingInput) }
               override fun onFinishInput() { buf.setLength(0); super.onFinishInput() }
 
-              private fun render() = if (banglish && !raw) Engine.convert(buf.toString()) else buf.toString()
-
-              private fun build() {
-                  root.removeAllViews()
-                  suggest = btn("", 0f)
-                  suggest.textSize = 15f
-                  root.addView(suggest, LinearLayout.LayoutParams(-1, dp(36)))
-                  pages[page].forEach { row ->
-                      val l = rowLayout()
-                      row.split(" ").forEach { k -> l.addView(btn(k, 1f) { typed(k) }) }
-                      root.addView(l)
-                  }
-                  val b = rowLayout()
-                  b.addView(btn(if (page == 0) "অ আ" else if (page == 1) "১২৩" else "ক খ", 1.3f) { page = (page + 1) % 3; build() })
-                  b.addView(btn(if (banglish) "Bn→En" else "বাংলা", 1.5f) { finish(""); banglish = !banglish; build() })
-                  b.addView(btn(",", 0.8f) { typed(",") })
-                  b.addView(btn("space", 3f) { finish(" ") })
-                  b.addView(btn("।", 0.8f) { typed("।") })
-                  b.addView(btn("⌫", 1.2f) { back() })
-                  b.addView(btn("⏎", 1.2f) { finish(""); enter() })
-                  root.addView(b)
-              }
-
-              private fun isBanglaLetter(k: String) =
-                  k.length <= 2 && k[0] in '\u0980'..'\u09FF' && k != "।" && k[0] !in '০'..'৯' && k != "৳"
+              // ---------- টাইপিং লজিক ----------
+              private fun render() = if (banglish && !raw && lang == 0) Engine.convert(buf.toString()) else buf.toString()
 
               private fun typed(k: String) {
-                  if (isBanglaLetter(k)) {
-                      buf.append(k)
-                      if (raw) { finish(""); return }
-                      currentInputConnection?.setComposingText(render(), 1)
-                      suggest.text = if (banglish) buf.toString() + "  →  " + render() else buf.toString()
-                  } else finish(if (k == "।" && banglish && !raw) "." else k)
+                  val c = k[0]
+                  when {
+                      k.length == 1 && c in '\u0980'..'\u09FF' && c != '।' && c !in '০'..'৯' && c != '৳' -> {
+                          buf.append(k)
+                          if (raw) finish("") else {
+                              currentInputConnection?.setComposingText(render(), 1)
+                              updateBar()
+                          }
+                      }
+                      k.length == 1 && c in '০'..'৯' && banglish && !raw -> finish((c - '০').toString())
+                      c == '।' && banglish && !raw -> finish(".")
+                      else -> finish(k)
+                  }
               }
 
               private fun finish(extra: String) {
@@ -236,7 +286,7 @@ jobs:
                   val out = render()
                   buf.setLength(0)
                   ic.commitText(out + extra, 1)
-                  if (::suggest.isInitialized) suggest.text = ""
+                  updateBar()
               }
 
               private fun back() {
@@ -244,7 +294,7 @@ jobs:
                   if (buf.isNotEmpty()) {
                       buf.deleteCharAt(buf.length - 1)
                       if (buf.isEmpty()) ic.commitText("", 1) else ic.setComposingText(render(), 1)
-                      suggest.text = if (buf.isEmpty()) "" else buf.toString() + "  →  " + render()
+                      updateBar()
                   } else sendDownUpKeyEvents(KeyEvent.KEYCODE_DEL)
               }
 
@@ -257,17 +307,230 @@ jobs:
                   else sendDownUpKeyEvents(KeyEvent.KEYCODE_ENTER)
               }
 
-              private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
-              private fun rowLayout() = LinearLayout(this).apply {
-                  orientation = LinearLayout.HORIZONTAL
-                  layoutParams = LinearLayout.LayoutParams(-1, dp(48))
+              // ---------- UI ----------
+              private fun rebuild() { root.post { build() } }
+
+              private fun build() {
+                  dismissPopup()
+                  root.removeAllViews()
+                  root.setBackgroundColor(th.bg)
+                  root.addView(makeBar(), LinearLayout.LayoutParams(-1, dp(40)))
+                  val rows = when {
+                      page == 2 -> emoji
+                      page == 1 -> sym
+                      lang == 1 -> en
+                      else -> bn
+                  }
+                  rows.forEach { row ->
+                      val l = rowLayout(48)
+                      row.split(" ").forEach { tok -> l.addView(keyFor(tok)) }
+                      root.addView(l)
+                  }
+                  root.addView(bottomRow())
+                  updateBar()
               }
-              private fun btn(t: String, w: Float, click: (() -> Unit)? = null) = Button(this).apply {
-                  text = t; textSize = 18f; isAllCaps = false; setTextColor(0xFFFFFFFF.toInt())
-                  setBackgroundColor(0xFF37474F.toInt()); gravity = Gravity.CENTER
-                  setPadding(0, 0, 0, 0); minWidth = 0; minimumWidth = 0
-                  layoutParams = LinearLayout.LayoutParams(0, -1, w).apply { setMargins(2, 2, 2, 2) }
-                  if (click != null) setOnClickListener { click() }
+
+              private fun makeBar(): View {
+                  val bar = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+                  val themeBtn = actKey(if (isDark) "☀" else "🌙", 0f, 18f) {
+                      isDark = !isDark
+                      getSharedPreferences("kb", MODE_PRIVATE).edit().putBoolean("dark", isDark).apply()
+                      rebuild()
+                  }
+                  themeBtn.layoutParams = LinearLayout.LayoutParams(dp(44), -1).apply { setMargins(dp(2), dp(3), dp(2), dp(3)) }
+                  chips = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+                  val mode = actKey(if (banglish) "Banglish ✓" else "বাংলা", 0f, 13f, if (banglish) th.on else th.act) {
+                      finish(""); banglish = !banglish; rebuild()
+                  }
+                  mode.layoutParams = LinearLayout.LayoutParams(dp(98), -1).apply { setMargins(dp(2), dp(3), dp(2), dp(3)) }
+                  bar.addView(themeBtn)
+                  bar.addView(chips, LinearLayout.LayoutParams(0, -1, 1f))
+                  bar.addView(mode)
+                  return bar
+              }
+
+              private fun updateBar() {
+                  if (!::chips.isInitialized) return
+                  chips.removeAllViews()
+                  if (buf.isEmpty()) {
+                      chips.addView(TextView(this).apply {
+                          text = "Banglish Keyboard"; textSize = 13f; setTextColor(th.hint); setPadding(dp(8), 0, 0, 0)
+                      })
+                      return
+                  }
+                  val list = if (banglish && !raw && lang == 0) Engine.variants(buf.toString()) else listOf(buf.toString())
+                  list.forEachIndexed { i, v ->
+                      val chip = actKey(v, 1f, 15f, if (i == 0) th.key else th.bg) {
+                          buf.setLength(0)
+                          currentInputConnection?.commitText("$v ", 1)
+                          updateBar()
+                      }
+                      chips.addView(chip)
+                  }
+              }
+
+              private fun bottomRow(): View {
+                  val b = rowLayout(48)
+                  b.addView(actKey(if (page == 0) "?১২৩" else if (lang == 0) "কখগ" else "ABC", 1.2f, 15f) {
+                      finish(""); page = if (page == 0) 1 else 0; rebuild()
+                  })
+                  b.addView(actKey("😊", 1f, 20f) { finish(""); page = if (page == 2) 0 else 2; rebuild() })
+                  b.addView(actKey(if (lang == 0) "বাং" else "EN", 1f, 15f) {
+                      finish(""); lang = 1 - lang; page = 0; shiftState = 0; rebuild()
+                  })
+                  b.addView(actKey(",", 0.7f, 20f, th.key) { typed(",") })
+                  b.addView(actKey("space", 2.6f, 15f, th.key) { finish(" ") })
+                  b.addView(actKey(if (lang == 0) "।" else ".", 0.8f, 20f, th.key) { typed(if (lang == 0) "।" else ".") })
+                  b.addView(actKey("⏎", 1.2f, 20f) { finish(""); enter() })
+                  return b
+              }
+
+              private fun keyFor(tok: String): View {
+                  if (tok == "SHIFT") {
+                      return actKey(if (shiftState == 2) "⇪" else "⇧", 1.3f, 20f, if (shiftState > 0) th.on else th.act) {
+                          val now = System.currentTimeMillis()
+                          shiftState = if (shiftState == 1 && now - lastShift < 400) 2 else if (shiftState == 0) 1 else 0
+                          lastShift = now
+                          rebuild()
+                      }
+                  }
+                  if (tok == "BACK") return backKey()
+                  val primary = tok.substringBefore('|')
+                  val alts = if ('|' in tok) tok.substringAfter('|').split(",") else emptyList()
+                  val isKar = page == 0 && lang == 0 && primary.length == 1 && primary[0] in COMB
+                  return letterKey(primary, alts, if (isKar) th.kar else th.key)
+              }
+
+              private fun label(s: String) = if (s.length == 1 && s[0] in COMB) "ক$s" else s
+
+              private fun letterKey(primary: String, alts: List<String>, bg: Int): View {
+                  val shifted = page == 0 && shiftState > 0
+                  val out = if (shifted) (if (lang == 1) primary.uppercase() else alts.firstOrNull() ?: primary) else primary
+                  val hint = if (shifted) (if (lang == 0 && alts.isNotEmpty()) primary else "") else (alts.firstOrNull() ?: "")
+                  val f = box(label(out), bg, if (page == 2) 22f else 19f)
+                  if (hint.isNotEmpty()) {
+                      f.addView(TextView(this).apply {
+                          text = label(hint); textSize = 10f; setTextColor(th.hint)
+                          setPadding(0, dp(2), dp(5), 0); gravity = Gravity.END
+                      }, FrameLayout.LayoutParams(-1, -2, Gravity.TOP or Gravity.END))
+                  }
+                  f.layoutParams = LinearLayout.LayoutParams(0, -1, 1f).apply { setMargins(dp(2), dp(3), dp(2), dp(3)) }
+                  val popAlts = if (shifted) emptyList() else alts
+                  val after = { if (shiftState == 1) { shiftState = 0; rebuild() } }
+                  attachTouch(f, popAlts, { typed(out); after() }, { a -> typed(a); after() })
+                  return f
+              }
+
+              private fun backKey(): View = actKey("⌫", 1.3f, 20f) {}.apply {
+                  setOnTouchListener { v, e ->
+                      when (e.actionMasked) {
+                          MotionEvent.ACTION_DOWN -> {
+                              v.isPressed = true; v.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+                              back(); handler.postDelayed(repeat, 400)
+                          }
+                          MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> { v.isPressed = false; handler.removeCallbacks(repeat) }
+                      }
+                      true
+                  }
+              }
+
+              private fun actKey(label: String, w: Float, size: Float, bg: Int = th.act, click: () -> Unit): FrameLayout {
+                  val f = box(label, bg, size)
+                  f.layoutParams = LinearLayout.LayoutParams(0, -1, w).apply { setMargins(dp(2), dp(3), dp(2), dp(3)) }
+                  attachTouch(f, emptyList(), click, {})
+                  return f
+              }
+
+              private fun box(label: String, bg: Int, size: Float): FrameLayout {
+                  val f = FrameLayout(this)
+                  f.background = StateListDrawable().apply {
+                      addState(intArrayOf(android.R.attr.state_pressed), shape(th.press))
+                      addState(intArrayOf(), shape(bg))
+                  }
+                  f.addView(TextView(this).apply {
+                      text = label; textSize = size; setTextColor(th.ink); gravity = Gravity.CENTER
+                      maxLines = 1; includeFontPadding = false
+                  }, FrameLayout.LayoutParams(-1, -1))
+                  return f
+              }
+
+              // টাচ: ট্যাপ = মূল অক্ষর, চেপে ধরা = অল্টারনেট (একাধিক হলে পপআপ, সরিয়ে বেছে ছাড়ো)
+              private fun attachTouch(v: View, alts: List<String>, onTap: () -> Unit, onAlt: (String) -> Unit) {
+                  var long = false
+                  var items: List<TextView> = emptyList()
+                  var left = 0
+                  var cell = 1
+                  var sel = 0
+                  fun highlight() {
+                      items.forEachIndexed { i, t -> t.setBackground(if (i == sel) shape(th.on) else null) }
+                  }
+                  val lp = Runnable {
+                      long = true
+                      if (alts.size == 1) {
+                          v.isPressed = false
+                          v.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
+                          onAlt(alts[0])
+                      } else if (alts.size > 1) {
+                          v.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
+                          cell = dp(46)
+                          val box = LinearLayout(this).apply {
+                              orientation = LinearLayout.HORIZONTAL
+                              setBackground(shape(th.act)); setPadding(dp(4), dp(4), dp(4), dp(4))
+                          }
+                          items = alts.map { a ->
+                              TextView(this).apply {
+                                  text = label(a); textSize = 22f; gravity = Gravity.CENTER; setTextColor(th.ink)
+                                  layoutParams = LinearLayout.LayoutParams(cell, dp(48))
+                              }
+                          }
+                          items.forEach { box.addView(it) }
+                          val loc = IntArray(2)
+                          v.getLocationOnScreen(loc)
+                          val total = cell * alts.size + dp(8)
+                          val sw = resources.displayMetrics.widthPixels
+                          left = (loc[0] + v.width / 2 - total / 2).coerceIn(0, maxOf(0, sw - total))
+                          val p = PopupWindow(box, total, dp(56), false)
+                          p.isTouchable = false
+                          p.isClippingEnabled = false
+                          p.showAtLocation(root, Gravity.NO_GRAVITY, left, loc[1] - dp(60))
+                          popup = p
+                          sel = 0
+                          highlight()
+                      }
+                  }
+                  v.setOnTouchListener { _, e ->
+                      when (e.actionMasked) {
+                          MotionEvent.ACTION_DOWN -> {
+                              long = false
+                              v.isPressed = true
+                              v.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+                              if (alts.isNotEmpty()) handler.postDelayed(lp, 380)
+                          }
+                          MotionEvent.ACTION_MOVE -> if (popup != null && items.isNotEmpty()) {
+                              sel = ((e.rawX - left - dp(4)) / cell).toInt().coerceIn(0, items.size - 1)
+                              highlight()
+                          }
+                          MotionEvent.ACTION_UP -> {
+                              handler.removeCallbacks(lp)
+                              v.isPressed = false
+                              if (popup != null) {
+                                  val a = alts[sel]
+                                  dismissPopup()
+                                  onAlt(a)
+                              } else if (!long) onTap()
+                          }
+                          MotionEvent.ACTION_CANCEL -> { handler.removeCallbacks(lp); v.isPressed = false; dismissPopup() }
+                      }
+                      true
+                  }
+              }
+
+              private fun dismissPopup() { popup?.dismiss(); popup = null }
+              private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
+              private fun shape(c: Int) = GradientDrawable().apply { setColor(c); cornerRadius = dp(8).toFloat() }
+              private fun rowLayout(h: Int) = LinearLayout(this).apply {
+                  orientation = LinearLayout.HORIZONTAL
+                  layoutParams = LinearLayout.LayoutParams(-1, dp(h))
               }
           }
           EOF_FILE
