@@ -75,7 +75,7 @@ jobs:
           cat > app/src/main/java/com/example/banglish/Engine.kt <<'EOF_FILE'
           package com.example.banglish
 
-          /** বাংলা -> Banglish রূপান্তর ইঞ্জিন (নিয়মভিত্তিক, অফলাইন) */
+          /** বাংলা -> Banglish রূপান্তর ইঞ্জিন (নিয়মভিত্তিক, অফলাইন) */
           object Engine {
               private val C = mapOf(
                   'ক' to "k", 'খ' to "kh", 'গ' to "g", 'ঘ' to "gh", 'ঙ' to "ng",
@@ -84,7 +84,7 @@ jobs:
                   'ত' to "t", 'থ' to "th", 'দ' to "d", 'ধ' to "dh", 'ন' to "n",
                   'প' to "p", 'ফ' to "f", 'ব' to "b", 'ভ' to "bh", 'ম' to "m",
                   'য' to "j", 'র' to "r", 'ল' to "l", 'শ' to "sh", 'ষ' to "sh",
-                  'স' to "s", 'হ' to "h", 'ড়' to "r", 'ঢ়' to "rh", 'য়' to "y", 'ৎ' to "t"
+                  'স' to "s", 'হ' to "h", '\u09DC' to "r", '\u09DD' to "rh", '\u09DF' to "y", 'ৎ' to "t"
               )
               private val V = mapOf(
                   'অ' to "o", 'আ' to "a", 'ই' to "i", 'ঈ' to "i", 'উ' to "u", 'ঊ' to "u",
@@ -98,19 +98,19 @@ jobs:
               private val DIGITS = "০১২৩৪৫৬৭৮৯"
               private const val HOSONTO = '্'
 
-              /** জনপ্রিয় শব্দের সরাসরি বানান (নিয়মে ভুল হলে এখানে যোগ করো) */
+              /** জনপ্রিয় শব্দের সরাসরি বানান (নিয়মে ভুল হলে এখানে যোগ করো) */
               val dict = mutableMapOf(
                   "কী" to "ki", "কি" to "ki", "করছি" to "korchi", "করছ" to "korcho",
                   "করছো" to "korcho", "আমি" to "ami", "তুমি" to "tumi", "আপনি" to "apni",
                   "স্কুল" to "school", "ভালো" to "bhalo", "ধন্যবাদ" to "dhonnobad",
-                  "হ্যাঁ" to "hya", "না" to "na", "কেন" to "keno", "কোথায়" to "kothay"
+                  "হ্যাঁ" to "hya", "না" to "na", "কেন" to "keno", "কোথায়" to "kothay"
               )
 
               private fun isLetter(c: Char) = c in C || c in V || c in K || c in M
 
               fun convert(text: String): String {
-                  dict[text]?.let { return it }
-                  val s = text
+                  val s = text.replace("\u09A1\u09BC", "\u09DC").replace("\u09A2\u09BC", "\u09DD").replace("\u09AF\u09BC", "\u09DF")
+                  dict[s]?.let { return it }
                   val sb = StringBuilder()
                   var i = 0
                   while (i < s.length) {
@@ -162,13 +162,13 @@ jobs:
               private val buf = StringBuilder()
               private var banglish = true      // true: Banglish আউটপুট, false: সরাসরি বাংলা
               private var page = 0
-              private var raw = false          // পাসওয়ার্ড/ইমেইল ফিল্ড
+              private var raw = false          // পাসওয়ার্ড/ইমেইল ফিল্ড
               private lateinit var root: LinearLayout
               private lateinit var suggest: Button
 
               private val pages = listOf(
-                  listOf("ঙ য ড প ট চ জ হ গ ড়", "ৃ ু ি ব ্ া ক ত দ", "ঁ ো ে র ন স ম"),
-                  listOf("অ আ ই ঈ উ ঊ ঋ এ ঐ ও", "খ ঘ ঝ ঠ ঢ থ ধ ফ ভ ঔ", "ছ ণ ঞ ষ শ ল ং ঃ ৈ ৌ", "ূ ী ৎ ঢ় য় ড়"),
+                  listOf("ঙ য ড প ট চ জ হ গ ড়", "ৃ ু ি ব ্ া ক ত দ", "ঁ ো ে র ন স ম"),
+                  listOf("অ আ ই ঈ উ ঊ ঋ এ ঐ ও", "খ ঘ ঝ ঠ ঢ থ ধ ফ ভ ঔ", "ছ ণ ঞ ষ শ ল ং ঃ ৈ ৌ", "ূ ী ৎ ঢ় য় ড়"),
                   listOf("১ ২ ৩ ৪ ৫ ৬ ৭ ৮ ৯ ০", "! ? ' \" ( ) - : ; @", "/ # & * + = _ % ৳ ।")
               )
 
