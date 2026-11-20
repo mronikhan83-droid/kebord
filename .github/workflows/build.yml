@@ -1,0 +1,307 @@
+name: Build Banglish Keyboard APK
+on: [push, workflow_dispatch]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with: { distribution: temurin, java-version: 17 }
+      - uses: gradle/actions/setup-gradle@v3
+        with: { gradle-version: "8.7" }
+      - name: Generate project files
+        run: |
+          mkdir -p $(dirname settings.gradle.kts)
+          cat > settings.gradle.kts <<'EOF_FILE'
+          pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }
+          dependencyResolutionManagement { repositories { google(); mavenCentral() } }
+          rootProject.name = "BanglishKeyboard"
+          include(":app")
+          EOF_FILE
+          mkdir -p $(dirname build.gradle.kts)
+          cat > build.gradle.kts <<'EOF_FILE'
+          plugins {
+              id("com.android.application") version "8.5.2" apply false
+              id("org.jetbrains.kotlin.android") version "1.9.24" apply false
+          }
+          EOF_FILE
+          mkdir -p $(dirname gradle.properties)
+          cat > gradle.properties <<'EOF_FILE'
+          -e android.useAndroidX=true
+          org.gradle.jvmargs=-Xmx2g
+          EOF_FILE
+          mkdir -p $(dirname app/build.gradle.kts)
+          cat > app/build.gradle.kts <<'EOF_FILE'
+          plugins { id("com.android.application"); id("org.jetbrains.kotlin.android") }
+          android {
+              namespace = "com.example.banglish"
+              compileSdk = 34
+              defaultConfig {
+                  applicationId = "com.example.banglish"
+                  minSdk = 24; targetSdk = 34; versionCode = 1; versionName = "1.0"
+              }
+              compileOptions { sourceCompatibility = JavaVersion.VERSION_17; targetCompatibility = JavaVersion.VERSION_17 }
+              kotlinOptions { jvmTarget = "17" }
+          }
+          dependencies { testImplementation("junit:junit:4.13.2") }
+          EOF_FILE
+          mkdir -p $(dirname app/src/main/AndroidManifest.xml)
+          cat > app/src/main/AndroidManifest.xml <<'EOF_FILE'
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <application android:label="@string/app_name" android:allowBackup="false">
+                  <activity android:name=".MainActivity" android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN"/>
+                          <category android:name="android.intent.category.LAUNCHER"/>
+                      </intent-filter>
+                  </activity>
+                  <service android:name=".BanglishIME" android:label="@string/app_name"
+                      android:permission="android.permission.BIND_INPUT_METHOD" android:exported="true">
+                      <intent-filter><action android:name="android.view.InputMethod"/></intent-filter>
+                      <meta-data android:name="android.view.im" android:resource="@xml/method"/>
+                  </service>
+              </application>
+          </manifest>
+          EOF_FILE
+          mkdir -p $(dirname app/src/main/res/xml/method.xml)
+          cat > app/src/main/res/xml/method.xml <<'EOF_FILE'
+          <?xml version="1.0" encoding="utf-8"?><input-method xmlns:android="http://schemas.android.com/apk/res/android" android:settingsActivity="com.example.banglish.MainActivity"/>
+          EOF_FILE
+          mkdir -p $(dirname app/src/main/res/values/strings.xml)
+          cat > app/src/main/res/values/strings.xml <<'EOF_FILE'
+          <resources><string name="app_name">Banglish Keyboard</string></resources>
+          EOF_FILE
+          mkdir -p $(dirname app/src/main/java/com/example/banglish/Engine.kt)
+          cat > app/src/main/java/com/example/banglish/Engine.kt <<'EOF_FILE'
+          package com.example.banglish
+
+          /** বাংলা -> Banglish রূপান্তর ইঞ্জিন (নিয়মভিত্তিক, অফলাইন) */
+          object Engine {
+              private val C = mapOf(
+                  'ক' to "k", 'খ' to "kh", 'গ' to "g", 'ঘ' to "gh", 'ঙ' to "ng",
+                  'চ' to "c", 'ছ' to "ch", 'জ' to "j", 'ঝ' to "jh", 'ঞ' to "n",
+                  'ট' to "t", 'ঠ' to "th", 'ড' to "d", 'ঢ' to "dh", 'ণ' to "n",
+                  'ত' to "t", 'থ' to "th", 'দ' to "d", 'ধ' to "dh", 'ন' to "n",
+                  'প' to "p", 'ফ' to "f", 'ব' to "b", 'ভ' to "bh", 'ম' to "m",
+                  'য' to "j", 'র' to "r", 'ল' to "l", 'শ' to "sh", 'ষ' to "sh",
+                  'স' to "s", 'হ' to "h", 'ড়' to "r", 'ঢ়' to "rh", 'য়' to "y", 'ৎ' to "t"
+              )
+              private val V = mapOf(
+                  'অ' to "o", 'আ' to "a", 'ই' to "i", 'ঈ' to "i", 'উ' to "u", 'ঊ' to "u",
+                  'ঋ' to "ri", 'এ' to "e", 'ঐ' to "oi", 'ও' to "o", 'ঔ' to "ou"
+              )
+              private val K = mapOf(
+                  'া' to "a", 'ি' to "i", 'ী' to "i", 'ু' to "u", 'ূ' to "u", 'ৃ' to "ri",
+                  'ে' to "e", 'ৈ' to "oi", 'ো' to "o", 'ৌ' to "ou"
+              )
+              private val M = mapOf('ং' to "ng", 'ঃ' to "h", 'ঁ' to "n")
+              private val DIGITS = "০১২৩৪৫৬৭৮৯"
+              private const val HOSONTO = '্'
+
+              /** জনপ্রিয় শব্দের সরাসরি বানান (নিয়মে ভুল হলে এখানে যোগ করো) */
+              val dict = mutableMapOf(
+                  "কী" to "ki", "কি" to "ki", "করছি" to "korchi", "করছ" to "korcho",
+                  "করছো" to "korcho", "আমি" to "ami", "তুমি" to "tumi", "আপনি" to "apni",
+                  "স্কুল" to "school", "ভালো" to "bhalo", "ধন্যবাদ" to "dhonnobad",
+                  "হ্যাঁ" to "hya", "না" to "na", "কেন" to "keno", "কোথায়" to "kothay"
+              )
+
+              private fun isLetter(c: Char) = c in C || c in V || c in K || c in M
+
+              fun convert(text: String): String {
+                  dict[text]?.let { return it }
+                  val s = text
+                  val sb = StringBuilder()
+                  var i = 0
+                  while (i < s.length) {
+                      val c = s[i]
+                      when {
+                          c in V -> { sb.append(V[c]); i++ }
+                          c in M -> { sb.append(M[c]); i++ }
+                          c in K -> { sb.append(K[c]); i++ }
+                          c in C -> {
+                              var j = i
+                              sb.append(C[s[j]])
+                              while (j + 2 < s.length && s[j + 1] == HOSONTO && s[j + 2] in C) {
+                                  j += 2; sb.append(C[s[j]])
+                              }
+                              val k = j + 1
+                              when {
+                                  k < s.length && s[k] in K -> { sb.append(K[s[k]]); j = k }
+                                  k < s.length && s[k] == HOSONTO -> j = k
+                                  k < s.length && isLetter(s[k]) -> sb.append("o") // শব্দের মাঝে অ-কার
+                              }
+                              i = j + 1
+                          }
+                          c in DIGITS -> { sb.append(DIGITS.indexOf(c)); i++ }
+                          c == '।' -> { sb.append('.'); i++ }
+                          else -> { sb.append(c); i++ }
+                      }
+                  }
+                  return sb.toString()
+              }
+
+              /** পুরো বাক্যের জন্য (শব্দ আলাদা করে) */
+              fun convertSentence(t: String) = t.split(" ").joinToString(" ") { convert(it) }
+          }
+          EOF_FILE
+          mkdir -p $(dirname app/src/main/java/com/example/banglish/BanglishIME.kt)
+          cat > app/src/main/java/com/example/banglish/BanglishIME.kt <<'EOF_FILE'
+          package com.example.banglish
+
+          import android.inputmethodservice.InputMethodService
+          import android.text.InputType
+          import android.view.Gravity
+          import android.view.KeyEvent
+          import android.view.View
+          import android.view.inputmethod.EditorInfo
+          import android.widget.Button
+          import android.widget.LinearLayout
+
+          class BanglishIME : InputMethodService() {
+              private val buf = StringBuilder()
+              private var banglish = true      // true: Banglish আউটপুট, false: সরাসরি বাংলা
+              private var page = 0
+              private var raw = false          // পাসওয়ার্ড/ইমেইল ফিল্ড
+              private lateinit var root: LinearLayout
+              private lateinit var suggest: Button
+
+              private val pages = listOf(
+                  listOf("ঙ য ড প ট চ জ হ গ ড়", "ৃ ু ি ব ্ া ক ত দ", "ঁ ো ে র ন স ম"),
+                  listOf("অ আ ই ঈ উ ঊ ঋ এ ঐ ও", "খ ঘ ঝ ঠ ঢ থ ধ ফ ভ ঔ", "ছ ণ ঞ ষ শ ল ং ঃ ৈ ৌ", "ূ ী ৎ ঢ় য় ড়"),
+                  listOf("১ ২ ৩ ৪ ৫ ৬ ৭ ৮ ৯ ০", "! ? ' \" ( ) - : ; @", "/ # & * + = _ % ৳ ।")
+              )
+
+              override fun onCreateInputView(): View {
+                  root = LinearLayout(this).apply {
+                      orientation = LinearLayout.VERTICAL
+                      setBackgroundColor(0xFF263238.toInt())
+                  }
+                  build()
+                  return root
+              }
+
+              override fun onStartInput(info: EditorInfo?, restarting: Boolean) {
+                  super.onStartInput(info, restarting)
+                  val t = (info?.inputType ?: 0)
+                  val cls = t and InputType.TYPE_MASK_CLASS
+                  val v = t and InputType.TYPE_MASK_VARIATION
+                  raw = cls != InputType.TYPE_CLASS_TEXT ||
+                      v == InputType.TYPE_TEXT_VARIATION_PASSWORD ||
+                      v == InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD ||
+                      v == InputType.TYPE_TEXT_VARIATION_EMAIL_ADDRESS ||
+                      v == InputType.TYPE_TEXT_VARIATION_WEB_PASSWORD
+                  buf.setLength(0)
+              }
+
+              override fun onFinishInput() { buf.setLength(0); super.onFinishInput() }
+
+              private fun render() = if (banglish && !raw) Engine.convert(buf.toString()) else buf.toString()
+
+              private fun build() {
+                  root.removeAllViews()
+                  suggest = btn("", 0f)
+                  suggest.textSize = 15f
+                  root.addView(suggest, LinearLayout.LayoutParams(-1, dp(36)))
+                  pages[page].forEach { row ->
+                      val l = rowLayout()
+                      row.split(" ").forEach { k -> l.addView(btn(k, 1f) { typed(k) }) }
+                      root.addView(l)
+                  }
+                  val b = rowLayout()
+                  b.addView(btn(if (page == 0) "অ আ" else if (page == 1) "১২৩" else "ক খ", 1.3f) { page = (page + 1) % 3; build() })
+                  b.addView(btn(if (banglish) "Bn→En" else "বাংলা", 1.5f) { finish(""); banglish = !banglish; build() })
+                  b.addView(btn(",", 0.8f) { typed(",") })
+                  b.addView(btn("space", 3f) { finish(" ") })
+                  b.addView(btn("।", 0.8f) { typed("।") })
+                  b.addView(btn("⌫", 1.2f) { back() })
+                  b.addView(btn("⏎", 1.2f) { finish(""); enter() })
+                  root.addView(b)
+              }
+
+              private fun isBanglaLetter(k: String) =
+                  k.length <= 2 && k[0] in '\u0980'..'\u09FF' && k != "।" && k[0] !in '০'..'৯' && k != "৳"
+
+              private fun typed(k: String) {
+                  if (isBanglaLetter(k)) {
+                      buf.append(k)
+                      if (raw) { finish(""); return }
+                      currentInputConnection?.setComposingText(render(), 1)
+                      suggest.text = if (banglish) buf.toString() + "  →  " + render() else buf.toString()
+                  } else finish(if (k == "।" && banglish && !raw) "." else k)
+              }
+
+              private fun finish(extra: String) {
+                  val ic = currentInputConnection ?: return
+                  val out = render()
+                  buf.setLength(0)
+                  ic.commitText(out + extra, 1)
+                  if (::suggest.isInitialized) suggest.text = ""
+              }
+
+              private fun back() {
+                  val ic = currentInputConnection ?: return
+                  if (buf.isNotEmpty()) {
+                      buf.deleteCharAt(buf.length - 1)
+                      if (buf.isEmpty()) ic.commitText("", 1) else ic.setComposingText(render(), 1)
+                      suggest.text = if (buf.isEmpty()) "" else buf.toString() + "  →  " + render()
+                  } else sendDownUpKeyEvents(KeyEvent.KEYCODE_DEL)
+              }
+
+              private fun enter() {
+                  val opts = currentInputEditorInfo?.imeOptions ?: 0
+                  val action = opts and EditorInfo.IME_MASK_ACTION
+                  if (action != EditorInfo.IME_ACTION_NONE && action != EditorInfo.IME_ACTION_UNSPECIFIED &&
+                      opts and EditorInfo.IME_FLAG_NO_ENTER_ACTION == 0)
+                      currentInputConnection?.performEditorAction(action)
+                  else sendDownUpKeyEvents(KeyEvent.KEYCODE_ENTER)
+              }
+
+              private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
+              private fun rowLayout() = LinearLayout(this).apply {
+                  orientation = LinearLayout.HORIZONTAL
+                  layoutParams = LinearLayout.LayoutParams(-1, dp(48))
+              }
+              private fun btn(t: String, w: Float, click: (() -> Unit)? = null) = Button(this).apply {
+                  text = t; textSize = 18f; isAllCaps = false; setTextColor(0xFFFFFFFF.toInt())
+                  setBackgroundColor(0xFF37474F.toInt()); gravity = Gravity.CENTER
+                  setPadding(0, 0, 0, 0); minWidth = 0; minimumWidth = 0
+                  layoutParams = LinearLayout.LayoutParams(0, -1, w).apply { setMargins(2, 2, 2, 2) }
+                  if (click != null) setOnClickListener { click() }
+              }
+          }
+          EOF_FILE
+          mkdir -p $(dirname app/src/main/java/com/example/banglish/MainActivity.kt)
+          cat > app/src/main/java/com/example/banglish/MainActivity.kt <<'EOF_FILE'
+          package com.example.banglish
+
+          import android.app.Activity
+          import android.content.Intent
+          import android.os.Bundle
+          import android.provider.Settings
+          import android.view.inputmethod.InputMethodManager
+          import android.widget.*
+
+          class MainActivity : Activity() {
+              override fun onCreate(b: Bundle?) {
+                  super.onCreate(b)
+                  val l = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(48, 48, 48, 48) }
+                  l.addView(TextView(this).apply {
+                      textSize = 18f
+                      text = "Banglish Keyboard\n\n১) 'কিবোর্ড চালু করো' চাপো ও চালু করো\n২) 'কিবোর্ড বেছে নাও' চাপো\n৩) বাংলা লিখলে Banglish আসবে\n\nএই অ্যাপের ইন্টারনেট পারমিশন নেই, সব অফলাইন।\n"
+                  })
+                  l.addView(Button(this).apply { text = "কিবোর্ড চালু করো"
+                      setOnClickListener { startActivity(Intent(Settings.ACTION_INPUT_METHOD_SETTINGS)) } })
+                  l.addView(Button(this).apply { text = "কিবোর্ড বেছে নাও"
+                      setOnClickListener { (getSystemService(INPUT_METHOD_SERVICE) as InputMethodManager).showInputMethodPicker() } })
+                  l.addView(EditText(this).apply { hint = "এখানে টাইপ করে টেস্ট করো" })
+                  setContentView(l)
+              }
+          }
+          EOF_FILE
+      - name: Build APK
+        run: gradle assembleDebug --no-daemon
+      - uses: actions/upload-artifact@v4
+        with:
+          name: banglish-keyboard-apk
+          path: app/build/outputs/apk/debug/app-debug.apk
